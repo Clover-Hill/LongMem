@@ -51,8 +51,7 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                             help='path to save results',
                             default="./output/debug.json")
         parser.add_argument('--retrieval-layer-index', type=int, metavar='N',
-                            help='The layer index for retrieval',
-                            default="17")
+                            help='The layer index for retrieval')
         parser.add_argument('--use-external-memory', action="store_true",
                             help='use external memory or not',
                             default=False)
@@ -69,7 +68,6 @@ class NewGPTLanguageModel(FairseqLanguageModel):
             model.load_state_dict(state["model"], strict=True, args=args)
 
         return model
-
 
 class NewGPTDecoder(FairseqIncrementalDecoder):
     def __init__(self, args, task):
@@ -91,7 +89,7 @@ class NewGPTDecoder(FairseqIncrementalDecoder):
             use_external_memory=getattr(args, "use_external_memory", False),
         )
         self.model = NewGPTForCausalLM(config)
-
+        
         # set zero embedding for padding symbol
         self.pad_idx = task.target_dictionary.pad()
         self.model.transformer.wte.weight.data[self.pad_idx].zero_()
@@ -110,7 +108,7 @@ class NewGPTDecoder(FairseqIncrementalDecoder):
 
         lm_logits = self.model.lm_head(features)
         if return_all_hiddens:
-            return lm_logits, all_hidden_states, kv_dict, position_encoding
+            return (lm_logits, all_hidden_states, kv_dict, position_encoding)
         if features_only:
             return features
         return (lm_logits, None)
@@ -154,13 +152,14 @@ def default_architecture(args):
     args.attention_dropout = getattr(args, "attention_dropout", 0.1)
     args.tokens_per_sample = getattr(args, "tokens_per_sample", 2048)
     args.newgpt_window = getattr(args, "newgpt_window", args.tokens_per_sample)
-    args.retrieval_layer_index = getattr(args, "retrieval_layer_index", 10)
+    args.retrieval_layer_index = getattr(args, "retrieval_layer_index", 9)
 
 @register_model_architecture("newgpt", "newgpt-mini")
 def newgpt_medium(args):
     args.embed_dim = getattr(args, "embed_dim", 128)
     args.num_attention_heads = getattr(args, "num_attention_heads", 4)
     args.num_layers = getattr(args, "num_layers", 8)
+    args.retrieval_layer_index = getattr(args, "retrieval_layer_index", 6)
     default_architecture(args)
 
 @register_model_architecture("newgpt", "newgpt-medium")

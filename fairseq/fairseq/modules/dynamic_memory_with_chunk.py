@@ -91,6 +91,7 @@ class External_Memory:
             self.vals = [torch.zeros((self.memory_size//self.chunk_size), self.chunk_size, self.head_dim, dtype=torch.float16, device=torch.cuda.current_device()) for i in range(self.num_heads)]
 
     def add_index(self, qkv_val, retrieval_layer_index=None, padding_mask=None):
+        # Shape: batch * time * channel
         keys, vals = qkv_val['k'], qkv_val['v']
         bsz, seq_len = keys.shape[:2]
         

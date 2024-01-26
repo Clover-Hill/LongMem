@@ -1,3 +1,13 @@
+# Checkpoints
+*.pt
+*.bpe
+*.bin
+*.idx
+*.txt
+*.zip
+*.npy
+wandb/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

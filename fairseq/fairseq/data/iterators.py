@@ -563,6 +563,7 @@ class EpochBatchIterator(EpochBatchIterating):
                 batches = list(
                         ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
                     )
+                new_batches = batches
             else:
                 # My version for sharding
                 batches = self.frozen_batches
@@ -584,8 +585,8 @@ class EpochBatchIterator(EpochBatchIterating):
                     for passage in current_shard_passages:
                         l.append(passage[i])
                     new_batches.append(l)
-                print(new_batches[0])
-                print(new_batches[1])
+                # print(new_batches[0])
+                # print(new_batches[1])
                 """
                 Personal Notes:
                 In the next line, the Fairseq dataset is splited into different shard accoriding to different shard id of gpus

@@ -253,6 +253,8 @@ class NewGPTJointAttention(nn.Module):
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
 
+        external_memory = None
+
         if not external_memory:
             query = query.float() # (batch, seq_length, head_features)
             key = key.float()

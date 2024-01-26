@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./fairseq"
+    ],
+    "search.useIgnoreFiles": false
+}

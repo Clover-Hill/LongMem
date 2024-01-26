@@ -11,6 +11,7 @@ Evaluate the perplexity of a trained language model.
 import logging
 import math
 import os
+import numpy as np
 import sys
 from argparse import Namespace
 from typing import Iterable, List, Optional
@@ -45,6 +46,14 @@ def eval_lm(
     softmax_batch: int = 0,
     remove_bos_token: bool = False,
     device: Optional[torch.device] = None,
+    save_knnlm_dstore: Optional[bool] = False, 
+    knn_keytype: Optional[str] = None,
+    dstore_fp16: Optional[bool] = False, 
+    dstore_mmap: Optional[str] = None, 
+    dstore_size: Optional[int] = None, 
+    decoder_embed_dim: Optional[int] = None,
+    tokens_per_sample: Optional[int] = None,
+    context_window: Optional[int] = None,
 ):
     """
     Args:
@@ -104,6 +113,17 @@ def eval_lm(
 
     word_stats = dict()
 
+    if save_knnlm_dstore:
+        if dstore_fp16:
+            print('Saving fp16 KNN dstore')
+            dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(dstore_size,decoder_embed_dim))
+            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(dstore_size,decoder_embed_dim))
+        else:
+            print('Saving fp32')
+            dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(dstore_size,decoder_embed_dim))
+            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(dstore_size,decoder_embed_dim))
+        
+    dstore_idx = 0
     for sample in batch_iterator:
         if "net_input" not in sample:
             continue
@@ -111,11 +131,40 @@ def eval_lm(
         sample = utils.move_to_cuda(sample, device=device)
 
         gen_timer.start()
-        hypos = scorer.generate(models, sample)
+        if save_knnlm_dstore:
+            hypos = scorer.generate(models, sample, save_knnlm_dstore=save_knnlm_dstore)
+        else:
+            hypos = scorer.generate(models, sample)
         gen_timer.stop(sample["ntokens"])
 
         for i, hypos_i in enumerate(hypos):
             hypo = hypos_i[0]
+            
+            # Save datastore here
+            if save_knnlm_dstore:
+                keys = hypo['qkv_dict']['k']
+                vals = hypo['qkv_dict']['v']
+                # Shape: B*T*C 
+                shape = keys.shape 
+                
+                if shape[0]==tokens_per_sample-context_window:
+                    
+                    if dstore_idx+shape[0]>dstore_size:
+                        shape = [dstore_size-dstore_idx]
+                        keys=keys[:shape[0]]
+                        vals=vals[:shape[0]]
+                        
+                    if dstore_fp16:
+                        dstore_keys[dstore_idx:dstore_idx+shape[0]] = keys.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float16)
+                        dstore_vals[dstore_idx:dstore_idx+shape[0]] = vals.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float16)
+                    else:
+                        dstore_keys[dstore_idx:dstore_idx+shape[0]] = keys.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float32)
+                        dstore_vals[dstore_idx:dstore_idx+shape[0]] = vals.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float32)
+                
+                else:
+                    
+                    print("Skipping this one with shape", shape)
+            
             sample_id = sample["id"][i]
 
             tokens = hypo["tokens"]
@@ -134,14 +183,16 @@ def eval_lm(
                         skipped_toks += 1
                         pos_scores[i + 1] += pos_scores[i]
                         pos_scores[i] = 0
+            
+            # Why the need to comment this section?
 
-            inf_scores = pos_scores.eq(float("inf")) | pos_scores.eq(float("-inf"))
-            if inf_scores.any():
-                logger.info(
-                    "skipping tokens with inf scores:",
-                    target_dictionary.string(tokens[inf_scores.nonzero()]),
-                )
-                pos_scores = pos_scores[(~inf_scores).nonzero()]
+            # inf_scores = pos_scores.eq(float("inf")) | pos_scores.eq(float("-inf"))
+            # if inf_scores.any():
+            #     logger.info(
+            #         "skipping tokens with inf scores:",
+            #         target_dictionary.string(tokens[inf_scores.nonzero()]),
+            #     )
+            #     pos_scores = pos_scores[(~inf_scores).nonzero()]
             score_sum += pos_scores.sum().cpu()
             count += pos_scores.numel() - skipped_toks
 
@@ -181,6 +232,11 @@ def eval_lm(
                             )
                         )
                     )
+
+    if save_knnlm_dstore:
+        print("dstore_idx", dstore_idx, "final shape", shape)
+        print("Kyes", dstore_keys.shape, dstore_keys.dtype)
+        print("Vals", dstore_vals.shape, dstore_vals.dtype)
 
     avg_nll_loss = (
         -score_sum / count / math.log(2) if count > 0 else 0
@@ -258,7 +314,7 @@ def main(cfg: DictConfig, **unused_kwargs):
         num_shards=cfg.checkpoint.checkpoint_shard_count,
         task=task,
     )
-
+    
     use_fp16 = cfg.common.fp16
     use_cuda = torch.cuda.is_available() and not cfg.common.cpu
     if use_cuda:
@@ -325,6 +381,14 @@ def main(cfg: DictConfig, **unused_kwargs):
         target_dictionary=task.target_dictionary,
         softmax_batch=cfg.eval_lm.softmax_batch,
         remove_bos_token=getattr(cfg.task, "add_bos_token", False),
+        save_knnlm_dstore=cfg.eval_lm.save_knnlm_dstore,
+        knn_keytype=cfg.eval_lm.knn_keytype,
+        dstore_mmap=cfg.eval_lm.dstore_mmap,
+        dstore_size=cfg.eval_lm.dstore_size,
+        dstore_fp16=cfg.eval_lm.dstore_fp16,
+        context_window=cfg.eval_lm.context_window,
+        decoder_embed_dim=model_args.model.embed_dim,
+        tokens_per_sample=model_args.model.tokens_per_sample
     )
 
     logger.info(

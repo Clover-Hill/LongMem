@@ -65,7 +65,15 @@ class SequenceScorer(object):
         avg_attn = None
         for model in models:
             model.eval()
-            decoder_out = model(**net_input)
+            
+            if 'save_knnlm_dstore' in kwargs:
+                # Hidden states: (lm_logits, all_hidden_states, kv_dict, position_encoding)
+                decoder_out = model(**net_input, return_all_hiddens=True)
+                # Store qkv_dict
+                qkv_dict = decoder_out[2]
+            else:
+                decoder_out = model(**net_input)
+
             attn = decoder_out[1] if len(decoder_out) > 1 else None
             if type(attn) is dict:
                 attn = attn.get("attn", None)
@@ -139,6 +147,12 @@ class SequenceScorer(object):
                     alignment = None
             else:
                 avg_attn_i = alignment = None
+            
+            # import pdb 
+            # print("start index:",start_idxs[i])
+            # print(qkv_dict["k"][i,start_idxs[i]:,:])
+            # pdb.set_trace()
+            
             hypos.append(
                 [
                     {
@@ -147,6 +161,8 @@ class SequenceScorer(object):
                         "attention": avg_attn_i,
                         "alignment": alignment,
                         "positional_scores": avg_probs_i,
+                        # Return qkv dict
+                        "qkv_dict": {"k":qkv_dict["k"][i,start_idxs[i]:,:],"v":qkv_dict["v"][i,start_idxs[i]:,:]},
                     }
                 ]
             )
