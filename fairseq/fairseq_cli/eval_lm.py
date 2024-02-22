@@ -119,7 +119,7 @@ def eval_lm(
             dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(dstore_size,decoder_embed_dim))
             dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(dstore_size,decoder_embed_dim))
         else:
-            print('Saving fp32')
+            print('Saving fp32 KNN dstore')
             dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(dstore_size,decoder_embed_dim))
             dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(dstore_size,decoder_embed_dim))
         
@@ -237,6 +237,8 @@ def eval_lm(
         print("dstore_idx", dstore_idx, "final shape", shape)
         print("Kyes", dstore_keys.shape, dstore_keys.dtype)
         print("Vals", dstore_vals.shape, dstore_vals.dtype)
+        dstore_keys.flush()
+        dstore_vals.flush()
 
     avg_nll_loss = (
         -score_sum / count / math.log(2) if count > 0 else 0
