@@ -6,6 +6,8 @@
 *.txt
 *.zip
 *.npy
+*.index
+*.trained
 wandb/
 
 # Byte-compiled / optimized / DLL files
