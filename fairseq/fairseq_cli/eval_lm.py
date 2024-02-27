@@ -161,6 +161,7 @@ def eval_lm(
                         dstore_keys[dstore_idx:dstore_idx+shape[0]] = keys.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float32)
                         dstore_vals[dstore_idx:dstore_idx+shape[0]] = vals.view(-1, decoder_embed_dim).cpu().numpy().astype(np.float32)
                 
+                    dstore_idx+=shape[0]
                 else:
                     
                     print("Skipping this one with shape", shape)
