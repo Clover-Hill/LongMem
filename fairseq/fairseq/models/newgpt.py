@@ -32,7 +32,8 @@ class NewGPTLanguageModel(FairseqLanguageModel):
     @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
-        # fmt: off
+        
+        # Basic model args
         parser.add_argument('--gpt-model-path', default="", help='checkpoint path')
         parser.add_argument('--embed-dim', type=int, metavar='N',
                             help='embedding dimension')
@@ -45,17 +46,34 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                                  'in the embeddings, encoder, and pooler')
         parser.add_argument('--attention-dropout', type=float, metavar='D',
                             help='dropout probability for attention weights')
-        parser.add_argument('--newgpt-mode', type=str, metavar='N',
-                            help='change the model structure')
         parser.add_argument('--result-path', type=str, metavar='N',
                             help='path to save results',
                             default="./output/debug.json")
+        
+        # Positional Embedding type
+        parser.add_argument('--newgpt-mode', type=str, metavar='N',
+                            help='change the model structure')
+        
+        # Retrieval args
+        parser.add_argument('--use-knn-memory', action="store_true",
+                            help='use knn memory or not',
+                            default=False)
         parser.add_argument('--retrieval-layer-index', type=int, metavar='N',
                             help='The layer index for retrieval')
-        parser.add_argument('--use-external-memory', action="store_true",
-                            help='use external memory or not',
-                            default=False)
-        # fmt: on
+        parser.add_argument('--probe', default=8, type=int,
+                            help='for FAISS, the number of lists to query')
+        parser.add_argument('--k', default=1024, type=int,
+                            help='number of nearest neighbors to retrieve')
+        parser.add_argument('--dstore-size', default= 103226509 , type=int,
+                            help='number of items in the knnlm datastore')
+        parser.add_argument('--dstore-filename', type=str, default=None,
+                            help='File where the knnlm datastore is saved')
+        parser.add_argument('--indexfile', type=str, default=None,
+                            help='File containing the index built using faiss for knn')
+        parser.add_argument('--dstore-fp16', default=False, action='store_true',
+                            help='if true, datastore items are saved in fp16 and int16')
+        parser.add_argument('--move-dstore-to-mem', default=False, action='store_true',
+                            help='move the keys and values for knn to memory')
 
     @classmethod
     def build_model(cls, args, task):
@@ -63,8 +81,14 @@ class NewGPTLanguageModel(FairseqLanguageModel):
         
         default_architecture(args)
         model = cls(NewGPTDecoder(args, task))
+        
+        # This might gets overwritten in train.py
+        # The pipeline in train.py: build_model() -> build_trainer() -> load_from_checkpoint()
         if args.gpt_model_path != "":
             state = checkpoint_utils.load_checkpoint_to_cpu(args.gpt_model_path)
+            print("First time finetuning:")
+            print(f"Loading pretrained model from {args.gpt_model_path}")
+            # Might need to change: strict=False
             model.load_state_dict(state["model"], strict=True, args=args)
 
         return model
@@ -86,7 +110,14 @@ class NewGPTDecoder(FairseqIncrementalDecoder):
             attn_pdrop=args.attention_dropout,
             layer_norm_epsilon=1e-6,
             retrieval_layer_index=args.retrieval_layer_index,
-            use_external_memory=getattr(args, "use_external_memory", False),
+            use_knn_memory=getattr(args, "use_knn_memory", False),
+            probe=args.probe,
+            k=args.k,
+            dstore_size=args.dstore_size,
+            dstore_filename=args.dstore_filename,
+            indexfile=args.indexfile,
+            dstore_fp16=args.dstore_fp16,
+            move_store_to_mem=args.move_dstore_to_mem,
         )
         self.model = NewGPTForCausalLM(config)
         

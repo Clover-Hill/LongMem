@@ -70,7 +70,14 @@ class NewGPTConfig(PretrainedConfig):
         bos_token_id=50256,
         eos_token_id=50256,
         tie_word_embeddings=False,
-        retrieval_layer_index=17,
+        retrieval_layer_index=9,
+        probe=8,
+        k=1024,
+        dstore_size=103226509,
+        dstore_filename=None,
+        indexfile=None,
+        dstore_fp16=True,
+        move_dstore_to_mem=False,
         **kwargs
     ):
         self.vocab_size = vocab_size
@@ -92,7 +99,16 @@ class NewGPTConfig(PretrainedConfig):
 
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+        
+        # Retrieval Config 
         self.retrieval_layer_index = retrieval_layer_index
+        self.probe = probe 
+        self.k = k 
+        self.dstore_size = dstore_size 
+        self.dstore_filename = dstore_filename 
+        self.indexfile = indexfile 
+        self.dstore_fp16 = dstore_fp16 
+        self.move_dstore_to_mem = move_dstore_to_mem
 
         super().__init__(
             bos_token_id=bos_token_id, eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs

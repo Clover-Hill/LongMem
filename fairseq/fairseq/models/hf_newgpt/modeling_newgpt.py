@@ -22,7 +22,7 @@ from transformers.utils import add_code_sample_docstrings, add_start_docstrings,
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from .configuration_newgpt import NewGPTConfig
 
-
+from fairseq.modules.knn_memory import KNN_Dstore
 
 def fixed_pos_embedding(dim, seq_len, device):
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim))
@@ -118,10 +118,13 @@ def _merge_heads(tensor, num_attention_heads, attn_head_size):
     """
     if len(tensor.shape) == 5:
         tensor = tensor.permute(0, 1, 3, 2, 4).contiguous()
+    # (bsz, nhead, seq_len, head_dim) -> (bsz, seq_len, nhead, head_dim)
     elif len(tensor.shape) == 4:
         tensor = tensor.permute(0, 2, 1, 3).contiguous()
     else:
         raise ValueError(f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}")
+    
+    # (bsz, seq_len, nhead, head_dim) -> (bsz, seq_len, hidden_dim)
     new_shape = tensor.size()[:-2] + (num_attention_heads * attn_head_size,)
     return tensor.view(new_shape)
 
@@ -226,10 +229,11 @@ class NewGPTJointAttention(nn.Module):
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
 
-        # memory bias
-        # self.memory_bias
-
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
+        
+        # Define dstore for this memory layer
+        print(f"Creating KNN Memory Dstore with indexfile: {config.indexfile}")
+        self.knn_memory = KNN_Dstore(config)
 
         self.mode = config.mode
         if self.mode == "rot-momentum":
@@ -253,10 +257,10 @@ class NewGPTJointAttention(nn.Module):
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
 
-        external_memory = None
+        knn_memory = None
 
-        if not external_memory:
-            query = query.float() # (batch, seq_length, head_features)
+        if not knn_memory:
+            query = query.float() # (batch, seq_length, hidden_dim)
             key = key.float()
             value = value.float()
 
@@ -278,9 +282,13 @@ class NewGPTJointAttention(nn.Module):
         else:
             present = None
         
+        # After _split_heads, the shape changes:
+        # (batch, seq_length, hidden_dim) -> (batch, head, seq_length, head_features)
         query = _split_heads(query, self.num_attention_heads, self.head_dim)
         key = _split_heads(key, self.num_attention_heads, self.head_dim)
         value_split = _split_heads(value, self.num_attention_heads, self.head_dim)
+
+        # Rotary position encoding
         if self.mode == "rotary" or self.mode == "rot-momentum":
             sin, cos = position_encoding
             key = apply_rotary_pos_emb(key, sin, cos)
@@ -292,39 +300,62 @@ class NewGPTJointAttention(nn.Module):
 
         # retrieval to get keys and vals
         # query: bsz * nhead * seq_len * head_dim
-        if external_memory:
-            if external_memory.dstore_idx == 0:
-                if not disable_add_index:
-                    external_memory.add_index(qkv_dict)
-            else:
+        if knn_memory:
 
-                retrieval_output = external_memory.retrieve(qkv_dict['q'])
-                long_context_retrieval = retrieval_output['tgt_index']
-                
-                retrieval_k, retrieval_v = long_context_retrieval['k'].to(query.device).type(query.dtype), long_context_retrieval['v'].to(query.device).type(query.dtype)
+            retrieval_output = knn_memory.retrieve(qkv_dict['q'])
+            
+            # retrieval_k/v: bsz * num_heads * seq_len * k * head_dim
+            retrieval_k = retrieval_output['keys'].to(query.device).type(query.dtype)
+            retrieval_v = retrieval_output['vals'].to(query.device).type(query.dtype)
+            
+            # (bsz, nhead, seq_len, seq_len)
+            attn_weights = torch.matmul(query, key.transpose(-1, -2)) / self.scale_attn
+            
+            # (bsz, nhead, seq_len, 1, head_dim) @ (bsz, nhead,seq_len, head_dim, k) = (bsz, nhead, seq_len, 1, k)
+            # After squeeze(-2) becomes (bsz, nhead, seq_len, k)
+            attn_retrieval = torch.matmul(query.unsqueeze(-2), retrieval_k.transpose(-2, -1)).squeeze(-2) / self.scale_attn
+            
+            # ALiBi Encoding
+            if self.mode == "alibi":
+                alibi = position_encoding[0]
+                attn_weights = attn_weights + alibi
 
-                attn_weights = torch.matmul(query, key.transpose(-1, -2)) / self.scale_attn
-                attn_retrieval = torch.matmul(query.unsqueeze(-2), retrieval_k.transpose(-2, -1)).squeeze(-2) / self.scale_attn
+            # No mask for KNN attention
+            attn_weights = torch.masked_fill(attn_weights, attention_mask, torch.finfo(attn_weights.dtype).min)
+            
+            ############### Memorizing Transforers Implementation ###############
+            # Soft max
+            # attn_text_probs = torch.softmax(attn_weights, dim=-1)
+            # attn_retrieval_probs = torch.softmax(attn_retrieval, dim=-1)
 
-                if self.mode == "alibi":
-                    alibi = position_encoding[0]
-                    attn_weights = attn_weights + alibi
-                attn_weights = torch.masked_fill(attn_weights, attention_mask, torch.finfo(attn_weights.dtype).min)
-                attn_text_probs = torch.softmax(attn_weights, dim=-1)
-                attn_retrieval_probs = torch.softmax(attn_retrieval, dim=-1)
+            # (bsz, nhead, seq_len, head_dim) * (bsz, nhead, 1, 1)
+            # attn_original_output = torch.matmul(attn_text_probs, value_split) * (1 - torch.sigmoid(self.memory_bias.reshape(1, self.num_attention_heads, 1, 1).repeat(key.shape[0], 1, 1, 1))) 
+            
+            # (bsz, nhead, seq_len, 1, k) @ (bsz, nhead, seq_len, k, head_dim) -> (bsz, nhead, seq_len, head_dim)
+            # attn_retrieval_output = torch.matmul(attn_retrieval_probs.unsqueeze(-2), retrieval_v).squeeze(-2) * torch.sigmoid(self.memory_bias.reshape(1, self.num_attention_heads, 1, 1))
 
-                attn_output = torch.matmul(attn_text_probs, value_split) * (1 - torch.sigmoid(self.memory_bias.reshape(1, self.num_attention_heads, 1, 1).repeat(key.shape[0], 1, 1, 1))) + torch.matmul(attn_retrieval_probs.unsqueeze(-2), retrieval_v).squeeze(-2) * torch.sigmoid(self.memory_bias.reshape(1, self.num_attention_heads, 1, 1))
+            ###############  My new Implementation, without the sigmoid gate ###############
+            # Shape for hybrid attention: (bsz, nhead, seq_len, seq_len+k)
+            attn_hybrid = torch.cat((attn_weights,attn_retrieval), dim = -1)
+            attn_hybrid_probs = torch.softmax(attn_hybrid, dim=-1)
+            assert(attn_hybrid.shape[2]+self.knn_memory.k==attn_hybrid_probs.shape[-1])
+            attn_original_probs, attn_retrieval_probs = attn_hybrid_probs[..., :attn_hybrid.shape[2]], attn_hybrid_probs[..., attn_hybrid.shape[2]:]
 
-                attn_output = _merge_heads(attn_output, self.num_attention_heads, self.head_dim)
-                attn_output = attn_output.to(hidden_states.dtype)
+            attn_original_output = torch.matmul(attn_original_probs, value_split) 
+            attn_retrieval_output = torch.matmul(attn_retrieval_probs.unsqueeze(-2), retrieval_v).squeeze(-2) 
+            attn_output = attn_original_output + attn_retrieval_output
 
-                attn_output = self.out_proj(attn_output)
-                attn_output = self.resid_dropout(attn_output)
-                outputs = (attn_output, present)
-                if output_attentions:
-                    outputs += (attn_weights,)
-                external_memory.add_index(qkv_dict)
-                return outputs, qkv_dict
+            attn_output = _merge_heads(attn_output, self.num_attention_heads, self.head_dim)
+            attn_output = attn_output.to(hidden_states.dtype)
+
+            attn_output = self.out_proj(attn_output)
+            attn_output = self.resid_dropout(attn_output)
+
+            outputs = (attn_output, present)
+            if output_attentions:
+                outputs += (attn_weights,)
+
+            return outputs, qkv_dict
 
         # compute self-attention: V x Softmax(QK^T)  
         attn_weights = torch.matmul(query, key.transpose(-1, -2)) / self.scale_attn
@@ -356,7 +387,6 @@ class NewGPTJointAttention(nn.Module):
             outputs += (attn_weights,)
 
         return outputs, qkv_dict  # a, present, (attentions)
-
 
 
 class NewGPTAttention(nn.Module):
@@ -398,6 +428,7 @@ class NewGPTAttention(nn.Module):
         Tuple[torch.Tensor, Tuple[torch.Tensor]],
         Optional[Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor, ...]]],
     ]:
+        # Projection Matrices: Embed Dim -> Embed Dim
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
@@ -571,29 +602,37 @@ class NewGPTModel(NewGPTPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+        self.gradient_checkpointing = False
         self.mode = config.mode
+
+        # Model basic params
         self.embed_dim = config.n_embd
         self.num_attention_heads = config.num_attention_heads
         self.vocab_size = config.vocab_size
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList([NewGPTBlock(config) for _ in range(config.n_layer)])
-        if config.use_external_memory:
-            self.h[config.retrieval_layer_index].attn = NewGPTJointAttention(config)
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        
-        # print(config)
-        self.retrieval_layer_index = getattr(config, "retrieval_layer_index", 17)
-        print("NewGPT retrieval Layer Index", self.retrieval_layer_index)
-        # Model parallel
-        self.model_parallel = False
-        self.device_map = None
-        self.gradient_checkpointing = False
-
         self.head_dim = self.embed_dim // self.num_attention_heads
+        
+        # Rotary Positional Embedding
         self.scale_div = 128
         if self.mode == "rot-scale":
             self.scale_base = get_scale(self.head_dim)
+
+        # External Memory Layer
+        self.retrieval_layer_index = config.retrieval_layer_index
+        print("NewGPT retrieval Layer Index", self.retrieval_layer_index)
+        if config.use_knn_memory:
+            self.h[config.retrieval_layer_index].attn = NewGPTJointAttention(config)
+            
+            # Freeze all layers below retrieval_layer_index
+            for i,layer in enumerate(self.h):
+                if i<self.retrieval_layer_index:
+                    layer.requires_grad=False
             
         # Initialize weights and apply final processing
         self.post_init()
@@ -932,6 +971,8 @@ class NewGPTForCausalLM(NewGPTPreTrainedModel):
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
+            # 1. Cut off the last element of logis
+            # 2. Move the label one position right 
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
