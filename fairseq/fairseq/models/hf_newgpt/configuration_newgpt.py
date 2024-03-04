@@ -74,8 +74,8 @@ class NewGPTConfig(PretrainedConfig):
         probe=8,
         k=1024,
         dstore_size=103226509,
-        dstore_filename=None,
-        indexfile=None,
+        chunk_size=4,
+        dstore_dir=None,
         dstore_fp16=True,
         move_dstore_to_mem=False,
         **kwargs
@@ -105,8 +105,8 @@ class NewGPTConfig(PretrainedConfig):
         self.probe = probe 
         self.k = k 
         self.dstore_size = dstore_size 
-        self.dstore_filename = dstore_filename 
-        self.indexfile = indexfile 
+        self.chunk_size = chunk_size
+        self.dstore_dir = dstore_dir
         self.dstore_fp16 = dstore_fp16 
         self.move_dstore_to_mem = move_dstore_to_mem
 

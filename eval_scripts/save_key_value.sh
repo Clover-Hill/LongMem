@@ -12,5 +12,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_P2P_DISABLE=1 \
     --save-knnlm-dstore \
     --dstore-size 103226509 \
     --dstore-fp16 \
-    --model-overrides '{"use_external_memory":True,"tokens_per_sample":1024}' \
+    --model-overrides '{"tokens_per_sample":1024}' \
     --dstore-mmap ${DSTROE_DIR} 

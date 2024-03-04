@@ -34,7 +34,6 @@ class NewGPTLanguageModel(FairseqLanguageModel):
         """Add model-specific arguments to the parser."""
         
         # Basic model args
-        parser.add_argument('--gpt-model-path', default="", help='checkpoint path')
         parser.add_argument('--embed-dim', type=int, metavar='N',
                             help='embedding dimension')
         parser.add_argument('--num-attention-heads', type=int, metavar='N',
@@ -55,6 +54,7 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                             help='change the model structure')
         
         # Retrieval args
+        parser.add_argument('--gpt-model-path', default="", help='checkpoint path')
         parser.add_argument('--use-knn-memory', action="store_true",
                             help='use knn memory or not',
                             default=False)
@@ -66,10 +66,10 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                             help='number of nearest neighbors to retrieve')
         parser.add_argument('--dstore-size', default= 103226509 , type=int,
                             help='number of items in the knnlm datastore')
-        parser.add_argument('--dstore-filename', type=str, default=None,
-                            help='File where the knnlm datastore is saved')
-        parser.add_argument('--indexfile', type=str, default=None,
-                            help='File containing the index built using faiss for knn')
+        parser.add_argument('--chunk-size', default=4, type=int,
+                            help='How many tokens to be merged together')
+        parser.add_argument('--dstore-dir', type=str, default=None,
+                            help='Dir where the knnlm datastore is saved')
         parser.add_argument('--dstore-fp16', default=False, action='store_true',
                             help='if true, datastore items are saved in fp16 and int16')
         parser.add_argument('--move-dstore-to-mem', default=False, action='store_true',
@@ -85,12 +85,12 @@ class NewGPTLanguageModel(FairseqLanguageModel):
         # This might gets overwritten in train.py
         # The pipeline in train.py: build_model() -> build_trainer() -> load_from_checkpoint()
         if args.gpt_model_path != "":
-            state = checkpoint_utils.load_checkpoint_to_cpu(args.gpt_model_path)
             print("First time finetuning:")
             print(f"Loading pretrained model from {args.gpt_model_path}")
+            state = checkpoint_utils.load_checkpoint_to_cpu(args.gpt_model_path)
             # Might need to change: strict=False
             model.load_state_dict(state["model"], strict=True, args=args)
-
+            
         return model
 
 class NewGPTDecoder(FairseqIncrementalDecoder):
@@ -111,13 +111,13 @@ class NewGPTDecoder(FairseqIncrementalDecoder):
             layer_norm_epsilon=1e-6,
             retrieval_layer_index=args.retrieval_layer_index,
             use_knn_memory=getattr(args, "use_knn_memory", False),
-            probe=args.probe,
-            k=args.k,
-            dstore_size=args.dstore_size,
-            dstore_filename=args.dstore_filename,
-            indexfile=args.indexfile,
-            dstore_fp16=args.dstore_fp16,
-            move_store_to_mem=args.move_dstore_to_mem,
+            probe=getattr(args,"probe",8),
+            k=getattr(args,"k",64),
+            dstore_size=getattr(args,"dstore_size",103226509),
+            chunk_size=getattr(args,"chunk_size",4),
+            dstore_dir=getattr(args,"dstore_dir",None),
+            dstore_fp16=getattr(args,"dstore_fp16",True),
+            move_store_to_mem=getattr(args,"move_dstore_to_mem",False),
         )
         self.model = NewGPTForCausalLM(config)
         
