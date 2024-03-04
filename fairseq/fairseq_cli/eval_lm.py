@@ -117,11 +117,11 @@ def eval_lm(
         if dstore_fp16:
             print('Saving fp16 KNN dstore')
             dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(dstore_size,decoder_embed_dim))
-            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(dstore_size,decoder_embed_dim))
+            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.float16, mode='w+', shape=(dstore_size,decoder_embed_dim))
         else:
             print('Saving fp32 KNN dstore')
             dstore_keys = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(dstore_size,decoder_embed_dim))
-            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(dstore_size,decoder_embed_dim))
+            dstore_vals = np.memmap(dstore_mmap+'_vals.npy', dtype=np.float32, mode='w+', shape=(dstore_size,decoder_embed_dim))
         
     dstore_idx = 0
     for sample in batch_iterator:
