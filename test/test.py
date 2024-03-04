@@ -1,14 +1,13 @@
-import numpy as np 
+import torch
+from torch import multiprocessing
+a = torch.tensor([.3, .4, 1.2]).cuda()
+print(a.is_shared())                       
 
-# dstore_mmap = "/home/jqcao/projects/memory_transformer/LongMem/key_value_dstore/5e-5_best"
+a.share_memory_()
 
-# 'r' stands for read-only
-# 'r+' stands for read and write
-# 'w+' stands for write-over
-
-# file = np.memmap(dstore_mmap+'_keys.npy', dtype=np.float16, mode='r', shape=(103226509,768))
-
-# print(file[0])
-
-list = [0] * 16
-print(list)
+def test(a):
+    print(a)                               
+p = multiprocessing.Process(target=test, args=(a, ))
+p.start()
+p.join()
+print(a)                                    
