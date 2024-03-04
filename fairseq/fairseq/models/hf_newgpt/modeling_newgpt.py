@@ -5,10 +5,14 @@ import numpy as np
 from scipy.optimize import minimize
 
 import torch
+import time
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn import Parameter
+import torch.distributed
+from multiprocessing.shared_memory import SharedMemory
+import pickle
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -232,12 +236,54 @@ class NewGPTJointAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
         
         # Define dstore for this memory layer
-        print(f"Creating KNN Memory Dstore with indexfile: {config.indexfile}")
-        self.knn_memory = KNN_Dstore(config)
+        if self.is_master():
+            print(f"Creating KNN Memory Dstore in dir: {config.dstore_dir}")
+        
+        # Use Shared Memory to save space
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
+        print(f"Current rank is {self.get_rank()}")
+        
+        if self.is_master():
+            # from pudb.remote import set_trace
+            # set_trace()
+            print(f"Loading Dstore to memory for the first time in rank {self.get_rank()}")
+            
+            serialized_memory = pickle.dumps(KNN_Dstore(config))
+            import pdb
+            pdb.set_trace()
+            
+            shm = SharedMemory(name="Shared_Dstore", create=True, size=len(serialized_memory))
+            shm.buf[:len(serialized_memory)] = serialized_memory
+            # Delete the original KNN Dstore object
+            del serialized_memory
+        
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        
+        print(f"Loading Dstore to memory with shared memory in rank {self.get_rank()}")
+        
+        shm = SharedMemory(name="Shared_Dstore", create=False)
+        self.knn_memory = pickle.loads(shm.buf[:])
+
+        # Support rotary embedding
         self.mode = config.mode
         if self.mode == "rot-momentum":
             self.ema = NewGPTEMA(config)
+            
+    def is_master(self):
+        if not torch.distributed.is_initialized():
+            return True
+        if torch.distributed.get_rank()==0:
+            return True 
+        return False
+
+    def get_rank(self):
+        if not torch.distributed.is_initialized():
+            return -1
+        else:
+            return torch.distributed.get_rank()
 
     def forward(
         self,
@@ -257,18 +303,16 @@ class NewGPTJointAttention(nn.Module):
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
 
-        knn_memory = None
-
-        if not knn_memory:
+        if not self.knn_memory:
             query = query.float() # (batch, seq_length, hidden_dim)
             key = key.float()
             value = value.float()
 
         qkv_dict = {"q": query.detach(), "k": key.detach(), "v": value.detach()}
-
+        
         seq_len = key.shape[1]
         offset = 0
-
+        
         if layer_past is not None:
             offset = layer_past[0].shape[-2]
             seq_len += offset
@@ -300,10 +344,13 @@ class NewGPTJointAttention(nn.Module):
 
         # retrieval to get keys and vals
         # query: bsz * nhead * seq_len * head_dim
-        if knn_memory:
+        if self.knn_memory:
 
-            retrieval_output = knn_memory.retrieve(qkv_dict['q'])
+            retrieval_output = self.knn_memory.retrieve(qkv_dict['q'])
             
+            import pdb 
+            pdb.set_trace()
+
             # retrieval_k/v: bsz * num_heads * seq_len * k * head_dim
             retrieval_k = retrieval_output['keys'].to(query.device).type(query.dtype)
             retrieval_v = retrieval_output['vals'].to(query.device).type(query.dtype)
@@ -344,6 +391,11 @@ class NewGPTJointAttention(nn.Module):
             attn_original_output = torch.matmul(attn_original_probs, value_split) 
             attn_retrieval_output = torch.matmul(attn_retrieval_probs.unsqueeze(-2), retrieval_v).squeeze(-2) 
             attn_output = attn_original_output + attn_retrieval_output
+            
+            ###############  Unlimiformer Implementation ###############
+            # hidden @ Q -> hidden_dim * (n_head,hidden_dim,head_dim) = (n_head, head_dim)
+            # @ K^(-1) -> (n_head , 1 , head_dim) * (n_head,head_dim,hidden_dim) = (n_head, hidden_dim)
+            # Then we query the hidden_dim vector from the KNN Dstore
 
             attn_output = _merge_heads(attn_output, self.num_attention_heads, self.head_dim)
             attn_output = attn_output.to(hidden_states.dtype)
@@ -625,17 +677,27 @@ class NewGPTModel(NewGPTPreTrainedModel):
 
         # External Memory Layer
         self.retrieval_layer_index = config.retrieval_layer_index
-        print("NewGPT retrieval Layer Index", self.retrieval_layer_index)
+        if self.is_master():
+            print("NewGPT retrieval Layer Index", self.retrieval_layer_index)
+
         if config.use_knn_memory:
             self.h[config.retrieval_layer_index].attn = NewGPTJointAttention(config)
             
             # Freeze all layers below retrieval_layer_index
-            for i,layer in enumerate(self.h):
-                if i<self.retrieval_layer_index:
-                    layer.requires_grad=False
+            for i in range(self.retrieval_layer_index):
+                for name,param in self.h[i].named_parameters():
+                    param.requires_grad = False
+            self.wte.weight.requires_grad = False
             
         # Initialize weights and apply final processing
         self.post_init()
+
+    def is_master(self):
+        if not torch.distributed.is_initialized():
+            return True
+        if torch.distributed.get_rank()==0:
+            return True 
+        return False
 
     def parallelize(self, device_map=None):
         # Check validity of device_map
@@ -871,6 +933,7 @@ class NewGPTForCausalLM(NewGPTPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
+        
         self.transformer = NewGPTModel(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
 

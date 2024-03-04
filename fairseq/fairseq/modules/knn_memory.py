@@ -3,27 +3,40 @@ import faiss
 import math
 import numpy as np
 from fairseq import utils
+import torch.distributed
+import pickle
 import time
+import os
+from tqdm import tqdm
 from fairseq.data import Dictionary
 
 class KNN_Dstore(object):
     def __init__(self, args):
-        self.dimension = args.embed_dim
+        self.dimension = args.n_embd
         self.k = args.k
-        self.dstore_size = args.dstore_size
+        # Use chunk for storing memory
+        self.dstore_size = args.dstore_size // args.chunk_size
         self.dstore_fp16 = args.dstore_fp16
         self.n_head = args.num_attention_heads
         self.head_dim = self.dimension // self.n_head
+        self.dstore_dir = args.dstore_dir
         # Probe trades speed for performance
         self.probe = args.probe
         
         # Initialize self.keys, self.vals, self.index
         self.keys, self.vals, self.index = self.setup_faiss(args)
-
+    
+    def is_master(self):
+        if not torch.distributed.is_initialized():
+            return True
+        if torch.distributed.get_rank()==0:
+            return True 
+        return False
+    
     def setup_faiss(self, args):
-        if not args.dstore_filename:
+        if not os.path.exists(self.dstore_dir):
             raise ValueError('Cannot build a datastore without the data.')
-
+        
         keys = []
         vals = []
         index = []
@@ -31,27 +44,25 @@ class KNN_Dstore(object):
         # Read Index
         start = time.time()
         
-        for i in range(self.n_head):
-            cur_index = faiss.read_index(args.indexfile+f'_{i}.index', faiss.IO_FLAG_ONDISK_SAME_DIR)
+        for i in tqdm(range(self.n_head), desc="Reading index files"):
+            cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'), faiss.IO_FLAG_ONDISK_SAME_DIR)
             cur_index.nprobe = self.probe
             index.append(cur_index)
-
-        print('Reading datastore took {} s'.format(time.time() - start))
-
+        
         # Memmap Dstore
-        for i in range(self.n_head):
+        for i in tqdm(range(self.n_head), desc="Reading Dstore to Memory"):
             if args.dstore_fp16:
-                print('Keys are fp16 and vals are int16')
-                cur_key = np.memmap(args.dstore_filename+f'_keys_{i}.npy', dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
-                cur_val = np.memmap(args.dstore_filename+f'_vals_{i}.npy', dtype=np.int16, mode='r', shape=(self.dstore_size, self.dimension))
+                cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
+                cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
             else:
-                print('Keys are fp32 and vals are int64')
-                cur_key = np.memmap(args.dstore_filename+f'_keys_{i}.npy', dtype=np.float32, mode='r', shape=(self.dstore_size, self.dimension))
-                cur_val = np.memmap(args.dstore_filename+f'_vals_{i}.npy', dtype=np.int, mode='r', shape=(self.dstore_size, self.dimension))
+                cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float33, mode='r', shape=(self.dstore_size, self.head_dim))
+                cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, self.head_dim))
             
-            keys.append(cur_key)
-            vals.append(cur_val)
-
+            keys.append(pickle.dumps(torch.tensor(cur_key).cpu().contiguous()))
+            vals.append(pickle.dumps(torch.tensor(cur_val).cpu().contiguous()))
+        
+        print('Reading datastore took {} s'.format(time.time() - start))
+    
         # Current can only load vals;
         # If the memory size exceeds 300GB, we can then also load keys;
         # if args.move_dstore_to_mem:
@@ -79,11 +90,39 @@ class KNN_Dstore(object):
         
         # knn shape: (seq_len*bsz) * k * dimension 
         # Perform KNN Search 
-        knns = [self.index[i].search(queries[:, i, :].contiguous(), self.k)[1] for i in range(self.n_head)]
+        start_time = time.time()
+        # Change query to cpu tensor
+        knns = [self.index[i].search(queries[:, i, :].contiguous().detach().cpu().float().numpy(), self.k)[1] for i in range(self.n_head)]
+        print(f'Search for query {queries.shape} cost {time.time()-start_time}s')
+        
+        import pdb 
+        pdb.set_trace()
+        
+        start_time = time.time()
+        keys_tgt_index = []
+        vals_tgt_index = []
+        for i in tqdm(range(self.n_head), desc=f'Key Value Indexing'):
+            self.keys[i]=pickle.loads(self.keys[i])
+            self.vals[i]=pickle.loads(self.vals[i])
+            if torch.is_tensor(self.keys[i]):
+                cur_keys = self.keys[i]
+            else:
+                cur_keys = np.zeros((self.dstore_size,self.head_dim),dtype=np.float16)
+                cur_keys = torch.tensor(self.keys[i][:]).cpu().contiguous()
+            
+            if torch.is_tensor(self.vals[i]):
+                cur_vals = self.vals[i]
+            else:
+                cur_vals = np.zeros((self.dstore_size,self.head_dim),dtype=np.float16)
+                cur_vals = torch.tensor(self.vals[i][:]).cpu().contiguous()
+            
+            keys_tgt_index.append(cur_keys[knns[i]])
+            vals_tgt_index.append(cur_vals[knns[i]])
 
-        keys_tgt_index = [self.keys[i][knns[i]].view(seq_len*bsz, self.k, self.head_dim) for i in range(self.n_head)]
-        vals_tgt_index = [self.vals[i][knns[i]].view(seq_len*bsz, self.k, self.head_dim) for i in range(self.n_head)] 
+        print(f'Finding keys and vals cost {time.time()-start_time}s')
 
+        pdb.set_trace()
+        
         # torch.stack(): Effectively means adding a new dimension in the dim param
         # list of (seq_len*bsz) * k * head_dim -> (seq_len*bsz) * num_heads * k * head_dim
         keys_tgt_index = torch.stack(keys_tgt_index, dim=1).view(seq_len, bsz*self.n_head, self.k, self.head_dim).transpose(0, 1)
