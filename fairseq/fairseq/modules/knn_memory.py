@@ -4,12 +4,15 @@ import math
 import numpy as np
 from fairseq import utils
 import torch.distributed
-import pickle
+import ray
 import time
 import os
+import ray
 from tqdm import tqdm
 from fairseq.data import Dictionary
 
+# KNN_Dstore is a stateful ray actor
+@ray.remote
 class KNN_Dstore(object):
     def __init__(self, args):
         self.dimension = args.n_embd
@@ -20,18 +23,24 @@ class KNN_Dstore(object):
         self.n_head = args.num_attention_heads
         self.head_dim = self.dimension // self.n_head
         self.dstore_dir = args.dstore_dir
+        self.dstore_fp16 = args.dstore_fp16
         # Probe trades speed for performance
         self.probe = args.probe
         
-        # Initialize self.keys, self.vals, self.index
-        self.keys, self.vals, self.index = self.setup_faiss(args)
+        # Store the [RefObject] of keys, vals and index
+        self.ref_keys, self.ref_vals, self.index = self.setup_faiss(args)
     
-    def is_master(self):
-        if not torch.distributed.is_initialized():
-            return True
-        if torch.distributed.get_rank()==0:
-            return True 
-        return False
+    def load_dstore_parallel(self,i):
+        if self.dstore_fp16:
+            cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
+            cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
+        else:
+            cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float33, mode='r', shape=(self.dstore_size, self.head_dim))
+            cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, self.head_dim))
+        return  (ray.put(np.array(cur_key)), ray.put(np.array(cur_val)))
+    
+    def retrieve_parallel(self,ref_key,ref_val,knn_index):
+        return (ref_key[knn_index],ref_val[knn_index])
     
     def setup_faiss(self, args):
         if not os.path.exists(self.dstore_dir):
@@ -39,90 +48,50 @@ class KNN_Dstore(object):
         
         keys = []
         vals = []
+        key_val = []
         index = []
         
-        # Read Index
+        # Read Index and set IO flag to faiss.IO_FLAG_MMAP
         start = time.time()
         
         for i in tqdm(range(self.n_head), desc="Reading index files"):
-            cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'), faiss.IO_FLAG_ONDISK_SAME_DIR)
+            cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'), faiss.IO_FLAG_MMAP)
             cur_index.nprobe = self.probe
             index.append(cur_index)
         
-        # Memmap Dstore
+        # Move Dstore to ray storage with multiprocessing
         for i in tqdm(range(self.n_head), desc="Reading Dstore to Memory"):
-            if args.dstore_fp16:
-                cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
-                cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float16, mode='r', shape=(self.dstore_size, self.head_dim))
-            else:
-                cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=np.float33, mode='r', shape=(self.dstore_size, self.head_dim))
-                cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=np.float32, mode='r', shape=(self.dstore_size, self.head_dim))
-            
-            keys.append(pickle.dumps(torch.tensor(cur_key).cpu().contiguous()))
-            vals.append(pickle.dumps(torch.tensor(cur_val).cpu().contiguous()))
+            key_val.append(self.load_dstore_parallel.remote(i))
+        key_val = ray.get(key_val)
+        keys = [key_val[i][0] for i in range(self.n_head)]
+        vals = [key_val[i][1] for i in range(self.n_head)]
         
         print('Reading datastore took {} s'.format(time.time() - start))
     
-        # Current can only load vals;
-        # If the memory size exceeds 300GB, we can then also load keys;
-        # if args.move_dstore_to_mem:
-        #     print('Loading to memory...')
-        #     start = time.time()
-
-            # del self.keys
-            # self.keys_from_memmap = np.memmap(args.dstore_filename+'_keys.npy', dtype=np.float32, mode='r', shape=(self.dstore_size, self.dimension))
-            # self.keys = np.zeros((self.dstore_size, self.dimension), dtype=np.float16 if args.dstore_fp16 else np.float32)
-            # self.keys = self.keys_from_memmap[:]
-            # self.keys = self.keys.astype(np.float16 if args.dstore_fp16 else np.float32)
-
-            # del self.vals
-            # self.vals_from_memmap = np.memmap(args.dstore_filename+'_vals.npy', dtype=np.int, mode='r', shape=(self.dstore_size, self.dimension))
-            # self.vals = np.zeros((self.dstore_size, self.dimension), dtype=np.int16 if args.dstore_fp16 else np.int)
-            # self.vals = self.vals_from_memmap[:]
-            # self.vals = self.vals.astype(np.int16 if args.dstore_fp16 else np.int)
-            # print('Loading to memory took {} s'.format(time.time() - start))
-            
+        # keys and vals are lists of ray RefObject, Index is a list of FAISS Index
         return keys, vals, index
 
-    def retrieve(self, queries):
+    async def retrieve(self, queries):
         seq_len, bsz, hidden_dim = queries.shape
         queries = queries.view(seq_len*bsz, self.n_head, self.head_dim).type(torch.float32)
         
         # knn shape: (seq_len*bsz) * k * dimension 
-        # Perform KNN Search 
         start_time = time.time()
-        # Change query to cpu tensor
+        # Perform KNN Search and Change query to cpu tensor
         knns = [self.index[i].search(queries[:, i, :].contiguous().detach().cpu().float().numpy(), self.k)[1] for i in range(self.n_head)]
         print(f'Search for query {queries.shape} cost {time.time()-start_time}s')
         
-        import pdb 
-        pdb.set_trace()
-        
         start_time = time.time()
+        # Perform parallel retrieving vectors based on index
+        all_tgt_index = []
         keys_tgt_index = []
         vals_tgt_index = []
-        for i in tqdm(range(self.n_head), desc=f'Key Value Indexing'):
-            self.keys[i]=pickle.loads(self.keys[i])
-            self.vals[i]=pickle.loads(self.vals[i])
-            if torch.is_tensor(self.keys[i]):
-                cur_keys = self.keys[i]
-            else:
-                cur_keys = np.zeros((self.dstore_size,self.head_dim),dtype=np.float16)
-                cur_keys = torch.tensor(self.keys[i][:]).cpu().contiguous()
-            
-            if torch.is_tensor(self.vals[i]):
-                cur_vals = self.vals[i]
-            else:
-                cur_vals = np.zeros((self.dstore_size,self.head_dim),dtype=np.float16)
-                cur_vals = torch.tensor(self.vals[i][:]).cpu().contiguous()
-            
-            keys_tgt_index.append(cur_keys[knns[i]])
-            vals_tgt_index.append(cur_vals[knns[i]])
-
+        for i in range(self.n_head):
+                all_tgt_index.append(self.retrieve_parallel.remote(self.ref_keys[i],self.ref_vals[i],knns[i]))
+        keys_tgt_index = [torch.tensor(all_tgt_index[i][0]) for i in range(self.n_head)]
+        vals_tgt_index = [torch.tensor(all_tgt_index[i][1]) for i in range(self.n_head)]
         print(f'Finding keys and vals cost {time.time()-start_time}s')
 
-        pdb.set_trace()
-        
         # torch.stack(): Effectively means adding a new dimension in the dim param
         # list of (seq_len*bsz) * k * head_dim -> (seq_len*bsz) * num_heads * k * head_dim
         keys_tgt_index = torch.stack(keys_tgt_index, dim=1).view(seq_len, bsz*self.n_head, self.k, self.head_dim).transpose(0, 1)

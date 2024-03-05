@@ -13,6 +13,7 @@ from torch.nn import Parameter
 import torch.distributed
 from multiprocessing.shared_memory import SharedMemory
 import pickle
+import ray
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -239,34 +240,19 @@ class NewGPTJointAttention(nn.Module):
         if self.is_master():
             print(f"Creating KNN Memory Dstore in dir: {config.dstore_dir}")
         
-        # Use Shared Memory to save space
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
         print(f"Current rank is {self.get_rank()}")
         
         if self.is_master():
-            # from pudb.remote import set_trace
-            # set_trace()
-            print(f"Loading Dstore to memory for the first time in rank {self.get_rank()}")
-            
-            serialized_memory = pickle.dumps(KNN_Dstore(config))
-            import pdb
-            pdb.set_trace()
-            
-            shm = SharedMemory(name="Shared_Dstore", create=True, size=len(serialized_memory))
-            shm.buf[:len(serialized_memory)] = serialized_memory
-            # Delete the original KNN Dstore object
-            del serialized_memory
+            KNN_Dstore.options(name=f"layer_{config.retrieval_layer_index}_dstore").remote(config) 
         
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
         
-        print(f"Loading Dstore to memory with shared memory in rank {self.get_rank()}")
+        self.knn_memory = ray.get_actor(f"layer_{config.retrieval_layer_index}_dstore")
         
-        shm = SharedMemory(name="Shared_Dstore", create=False)
-        self.knn_memory = pickle.loads(shm.buf[:])
-
         # Support rotary embedding
         self.mode = config.mode
         if self.mode == "rot-momentum":
@@ -346,7 +332,8 @@ class NewGPTJointAttention(nn.Module):
         # query: bsz * nhead * seq_len * head_dim
         if self.knn_memory:
 
-            retrieval_output = self.knn_memory.retrieve(qkv_dict['q'])
+            retrieval_output = self.knn_memory.retrieve.remote(qkv_dict['q'])
+            retrieval_output = ray.get(retrieval_output)
             
             import pdb 
             pdb.set_trace()
