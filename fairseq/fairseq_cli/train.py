@@ -26,6 +26,8 @@ logger = logging.getLogger("fairseq_cli.train")
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
+import ray
+import multiprocessing
 
 from fairseq import checkpoint_utils, options, quantization_utils, tasks, utils
 from fairseq.data import data_utils, iterators
@@ -548,6 +550,7 @@ def cli_main(
     args = options.parse_args_and_arch(parser, modify_parser=modify_parser)
 
     cfg = convert_namespace_to_omegaconf(args)
+    ray.init( num_cpus = multiprocessing.cpu_count() ,object_store_memory = 135 * 10**9, namespace="hybrid_memory" )
 
     if cfg.common.use_plasma_view:
         server = PlasmaStore(path=cfg.common.plasma_path)

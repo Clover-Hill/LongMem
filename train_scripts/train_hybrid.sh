@@ -4,7 +4,7 @@ SAVE_DIR=/home/jqcao/projects/memory_transformer/LongMem/checkpoint/newgpt-5e-5-
 DSTORE_DIR=/home/jqcao/projects/memory_transformer/LongMem/key_value_dstore/lr_5e-5_chunk_4
 PRETRAINED_DIR=/home/jqcao/projects/memory_transformer/LongMem/checkpoint/newgpt-5e-5
 
-WANDB_NAME="newgpt-small-hybrid" CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 \
+WANDB_NAME="newgpt-small-hybrid" CUDA_VISIBLE_DEVICES=0,1 NCCL_P2P_DISABLE=1 \
     fairseq-train ${DATA_DIR} \
     --task language_modeling \
     --save-dir ${SAVE_DIR} \
@@ -18,7 +18,7 @@ WANDB_NAME="newgpt-small-hybrid" CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 \
     --update-freq 4 \
     --save-interval-updates 5000 --sample-break-mode none \
     --tokens-per-sample 1024 \
-    --batch-size 8 --seed 1 \
+    --batch-size 4 --seed 1 \
     --use-knn-memory \
     --gpt-model-path ${PRETRAINED_DIR}/checkpoint_best.pt \
     --retrieval-layer-index 9 \
