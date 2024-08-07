@@ -1,8 +1,9 @@
-task=pile
-DATA_DIR=/path/to/pile_preprocessed_binary
-CKPT_DIR=models/longmem_gpt2_sidenet
-PTM_PATH=/path/to/pretrained_gpt2_model
+WANDB_PROJECT="decouple-lm"
+DATA_DIR=/home/jqcao/projects/memory_transformer/LongMem/data/wikitext-103/bin
+CKPT_DIR=/home/jqcao/projects/memory_transformer/LongMem/checkpoint/newgpt-5e-5-longmem
+PRETRAINED_DIR=/home/jqcao/projects/memory_transformer/LongMem/checkpoint/newgpt-5e-5
 
+WANDB_NAME="newgpt-small-longmem" CUDA_VISIBLE_DEVICES=4,5,6,7 NCCL_P2P_DISABLE=1 \
 fairseq-train ${DATA_DIR}  \
     --save-dir ${CKPT_DIR} \
     --task language_modeling --arch transformer_lm_sidenet_gpt2_small \
@@ -10,10 +11,11 @@ fairseq-train ${DATA_DIR}  \
     --optimizer adam --adam-betas '(0.9, 0.98)' --adam-eps 1e-6 \
     --lr 2e-4 --lr-scheduler polynomial_decay \
     --weight-decay 0.01 \
-    --save-interval-updates 10000 --sample-break-mode none \
+    --save-interval 1 --sample-break-mode none \
+    --ddp-backend=no_c10d \
     --tokens-per-sample 1024 \
     --batch-size 8 --total-num-update 100000 --seed 42 \
-    --pretrained-model-path /path/to/gpt2_pretrained_model \
+    --pretrained-model-path ${PRETRAINED_DIR}/checkpoint_best.pt \
     --layer-reduction-factor 2 \
     --disable-validation \
     --use-external-memory --memory-size 65536 \
@@ -22,7 +24,8 @@ fairseq-train ${DATA_DIR}  \
     --use-gpu-to-search \
     --no-token-positional-embeddings \
     --data-no-shuffle \
-    --retrieval-layer-index 17 \
-    --reload-ptm-layer
+    --retrieval-layer-index 9 \
+    --reload-ptm-layer \
+    --wandb-project $WANDB_PROJECT 
 
 # The --pre-trained-model path refers to the path to reproduced GPT-2-Medium checkpoints. You can find the downloading Google Drive url in README.
