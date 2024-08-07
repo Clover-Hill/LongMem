@@ -529,6 +529,7 @@ class EpochBatchIterator(EpochBatchIterating):
 
         return itr
 
+    # This function returns a list of batches, where each element is the sample id of current batch
     def ordered_batches(self, epoch, fix_batches_to_gpus, shuffle):
         def shuffle_batches(batches, seed):
             with data_utils.numpy_seed(seed):
@@ -570,23 +571,28 @@ class EpochBatchIterator(EpochBatchIterating):
                 total_samples = batches[-1][-1]
                 sample_list = list(range(total_samples))
                 bsz = len(batches[0])
+                
+                # num_passage = effective batch size
                 num_passages = self.num_shards * bsz
                 passage_len = int(math.ceil(total_samples / num_passages))
                 passages_list = [
                         sample_list[(i * passage_len) : (i + 1) * passage_len]
                         for i in range(num_passages)
                     ]
+                
+                # passages for current shard, len(current_shard_passages) = bsz
                 current_shard_passages = passages_list[self.shard_id * bsz : (self.shard_id + 1)*bsz]
                 len_per_pasage = [len(p) for p in current_shard_passages]
                 num_batches_current_shard = min((len_per_pasage))
                 new_batches = []
+                
+                # Suppose current_shard_passages = [[1,2,3],[4,5,6],[7,8,9]]
+                # new_batches = [[1,4,7],[2,5,8],[3,6,9]]
                 for i in range(num_batches_current_shard):
                     l = []
                     for passage in current_shard_passages:
                         l.append(passage[i])
                     new_batches.append(l)
-                # print(new_batches[0])
-                # print(new_batches[1])
                 """
                 Personal Notes:
                 In the next line, the Fairseq dataset is splited into different shard accoriding to different shard id of gpus

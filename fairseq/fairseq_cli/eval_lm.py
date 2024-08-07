@@ -47,7 +47,6 @@ def eval_lm(
     remove_bos_token: bool = False,
     device: Optional[torch.device] = None,
     save_knnlm_dstore: Optional[bool] = False, 
-    knn_keytype: Optional[str] = None,
     dstore_fp16: Optional[bool] = False, 
     dstore_mmap: Optional[str] = None, 
     dstore_size: Optional[int] = None, 
@@ -194,6 +193,7 @@ def eval_lm(
             #         target_dictionary.string(tokens[inf_scores.nonzero()]),
             #     )
             #     pos_scores = pos_scores[(~inf_scores).nonzero()]
+            
             score_sum += pos_scores.sum().cpu()
             count += pos_scores.numel() - skipped_toks
 
@@ -318,6 +318,8 @@ def main(cfg: DictConfig, **unused_kwargs):
         task=task,
     )
     
+    logger.info(f"Final model args: {model_args}")
+    
     use_fp16 = cfg.common.fp16
     use_cuda = torch.cuda.is_available() and not cfg.common.cpu
     if use_cuda:
@@ -385,13 +387,12 @@ def main(cfg: DictConfig, **unused_kwargs):
         softmax_batch=cfg.eval_lm.softmax_batch,
         remove_bos_token=getattr(cfg.task, "add_bos_token", False),
         save_knnlm_dstore=cfg.eval_lm.save_knnlm_dstore,
-        knn_keytype=cfg.eval_lm.knn_keytype,
         dstore_mmap=cfg.eval_lm.dstore_mmap,
         dstore_size=cfg.eval_lm.dstore_size,
         dstore_fp16=cfg.eval_lm.dstore_fp16,
         context_window=cfg.eval_lm.context_window,
-        decoder_embed_dim=model_args.model.embed_dim,
-        tokens_per_sample=model_args.model.tokens_per_sample
+        decoder_embed_dim=getattr(model_args.model, "embed_dim", 768),
+        tokens_per_sample=getattr(model_args.model, "tokens_per_sample", 1024)
     )
 
     logger.info(

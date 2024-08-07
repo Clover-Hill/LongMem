@@ -153,17 +153,31 @@ class SequenceScorer(object):
             # print(qkv_dict["k"][i,start_idxs[i]:,:])
             # pdb.set_trace()
             
-            hypos.append(
-                [
-                    {
-                        "tokens": ref,
-                        "score": score_i,
-                        "attention": avg_attn_i,
-                        "alignment": alignment,
-                        "positional_scores": avg_probs_i,
-                        # Return qkv dict
-                        "qkv_dict": {"k":qkv_dict["k"][i,start_idxs[i]:,:],"v":qkv_dict["v"][i,start_idxs[i]:,:]},
-                    }
-                ]
-            )
+            # Return qkv_dict only when save_knnlm_dstore==True
+            if 'save_knnlm_dstore' in kwargs:
+                hypos.append(
+                    [
+                        {
+                            "tokens": ref,
+                            "score": score_i,
+                            "attention": avg_attn_i,
+                            "alignment": alignment,
+                            "positional_scores": avg_probs_i,
+                            # Return qkv dict
+                            "qkv_dict": {"k":qkv_dict["k"][i,start_idxs[i]:,:],"v":qkv_dict["v"][i,start_idxs[i]:,:]},
+                        }
+                    ]
+                )
+            else:
+                hypos.append(
+                    [
+                        {
+                            "tokens": ref,
+                            "score": score_i,
+                            "attention": avg_attn_i,
+                            "alignment": alignment,
+                            "positional_scores": avg_probs_i,
+                        }
+                    ]
+                )
         return hypos
