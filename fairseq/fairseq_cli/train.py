@@ -550,7 +550,7 @@ def cli_main(
     args = options.parse_args_and_arch(parser, modify_parser=modify_parser)
 
     cfg = convert_namespace_to_omegaconf(args)
-    ray.init( num_cpus = multiprocessing.cpu_count() ,object_store_memory = 135 * 10**9, namespace="hybrid_memory" )
+    # ray.init( num_cpus = 12 ,object_store_memory = 60 * 10**9, namespace="hybrid_memory" )
 
     if cfg.common.use_plasma_view:
         server = PlasmaStore(path=cfg.common.plasma_path)

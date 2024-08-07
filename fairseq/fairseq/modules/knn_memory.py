@@ -9,29 +9,14 @@ import os
 import ray
 import asyncio
 from tqdm import tqdm
+from multiprocessing.shared_memory import SharedMemory
 from fairseq.data import Dictionary
 
-@ray.remote
-def load_dstore_parallel(dstore_fp16 ,dstore_dir ,dstore_size ,head_dim ,i):
-    if dstore_fp16:
-        cur_key = np.memmap(os.path.join(dstore_dir, f'{i}_keys.npy'), dtype=np.float16, mode='r', shape=(dstore_size, head_dim))
-        cur_val = np.memmap(os.path.join(dstore_dir, f'{i}_vals.npy'), dtype=np.float16, mode='r', shape=(dstore_size, head_dim))
-    else:
-        cur_key = np.memmap(os.path.join(dstore_dir, f'{i}_keys.npy'), dtype=np.float33, mode='r', shape=(dstore_size, head_dim))
-        cur_val = np.memmap(os.path.join(dstore_dir, f'{i}_vals.npy'), dtype=np.float32, mode='r', shape=(dstore_size, head_dim))
-    return  (ray.put(np.array(cur_key)), ray.put(np.array(cur_val)))
-
-@ray.remote
-def retrieve_parallel(ref_key,ref_val,knn_index):
-    return (ref_key[knn_index],ref_val[knn_index])
-
-# KNN_Dstore is a stateful ray actor
-@ray.remote
 class KNN_Dstore:
     def __init__(self, args):
         self.dimension = args.n_embd
         self.k = args.k
-        # Use chunk for storing memory
+        # Use chuknk for storing memory
         self.dstore_size = args.dstore_size // args.chunk_size
         self.dstore_fp16 = args.dstore_fp16
         self.n_head = args.num_attention_heads
@@ -41,42 +26,59 @@ class KNN_Dstore:
         # Probe trades speed for performance
         self.probe = args.probe
         
-        # Store the [RefObject * num_head] of keys, vals and index
-        self.ref_keys, self.ref_vals, self.index = [], [], []
+        # Read Index and set IO flag to faiss.IO_FLAG_MMAP
+        self.index = []
+        for i in tqdm(range(self.n_head),desc=f"Loading Index for rank {self.get_rank()}"):
+            if args.faiss_index_mmap:
+                cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'), faiss.IO_FLAG_MMAP)
+            else:
+                cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'))
+            cur_index.nprobe = self.probe
+            self.index.append(cur_index)
+            
+        # Keys and Vals
+        if self.dstore_fp16:
+            self.array_type = np.float16
+        else:
+            self.array_type = np.float32
+        self.array_shape = (self.n_head, self.dstore_size, self.head_dim)
     
-    def setup_faiss(self):
+    def build_dstore(self):
         if not os.path.exists(self.dstore_dir):
             raise ValueError('Cannot build a datastore without the data.')
         
         keys = []
         vals = []
-        key_val = []
-        index = []
         
-        # Read Index and set IO flag to faiss.IO_FLAG_MMAP
-        start = time.time()
-        
-        for i in tqdm(range(self.n_head), desc="Reading index files"):
-            print(os.path.join(self.dstore_dir, f'{i}.index'))
-            cur_index = faiss.read_index(os.path.join(self.dstore_dir, f'{i}.index'), faiss.IO_FLAG_MMAP)
-            cur_index.nprobe = self.probe
-            index.append(cur_index)
+        start_time = time.time()
         
         # Move Dstore to ray storage with multiprocessing
         for i in tqdm(range(self.n_head), desc="Reading Dstore to Memory"):
-            key_val.append(load_dstore_parallel.remote(self.dstore_fp16 ,self.dstore_dir ,self.dstore_size ,self.head_dim ,i))
-        key_val = ray.get(key_val)
-        keys = [key_val[i][0] for i in range(self.n_head)]
-        vals = [key_val[i][1] for i in range(self.n_head)]
+            cur_key = np.memmap(os.path.join(self.dstore_dir, f'{i}_keys.npy'), dtype=self.array_type, mode='r', shape=(self.dstore_size, self.head_dim))
+            cur_val = np.memmap(os.path.join(self.dstore_dir, f'{i}_vals.npy'), dtype=self.array_type, mode='r', shape=(self.dstore_size, self.head_dim))
+            keys.append(np.array(cur_key))
+            vals.append(np.array(cur_val))
+            
+        keys = np.array(keys)
+        vals = np.array(vals)
         
-        print('Reading datastore took {} s'.format(time.time() - start))
+        shm_keys = SharedMemory(create = True, size = keys.nbytes, name="shm_keys")
+        shm_vals = SharedMemory(create = True, size = vals.nbytes, name="shm_vals")
         
-        # keys and vals are lists of ray RefObject, Index is a list of FAISS Index
-        self.ref_keys, self.ref_vals, self.index = keys, vals, index
+        tmp_keys = np.ndarray(self.array_shape, dtype = self.array_type, buffer = shm_keys.buf)
+        tmp_vals = np.ndarray(self.array_shape, dtype = self.array_type, buffer = shm_vals.buf)
+        tmp_keys[:] = keys[:]
+        tmp_vals[:] = vals[:]
+        
+        print('Reading datastore took {} s'.format(time.time() - start_time))
 
-    async def retrieve(self, queries):
-        # from fairseq import pdb 
-        # pdb.set_trace()
+    def retrieve(self, queries):
+        # Load from SharedMemory
+        shm_keys = SharedMemory(create = False, name="shm_keys")
+        shm_vals = SharedMemory(create = False, name="shm_vals")
+
+        keys = np.ndarray(self.array_shape, dtype = self.array_type, buffer = shm_keys.buf)
+        vals = np.ndarray(self.array_shape, dtype = self.array_type, buffer = shm_vals.buf)
         
         # queries is of shape (bsz, seq_len, hidden_dim)
         bsz, seq_len, hidden_dim = queries.shape
@@ -86,20 +88,17 @@ class KNN_Dstore:
         start_time = time.time()
         # Perform KNN Search and Change query to cpu tensor
         knns = [self.index[i].search(queries[:, i, :].contiguous().detach().cpu().float().numpy(), self.k)[1] for i in range(self.n_head)]
-        print(f'Search for query {queries.shape} cost {time.time()-start_time}s')
+        # print(f'Search for query {queries.shape} cost {time.time()-start_time}s')
         
         start_time = time.time()
         # Perform parallel retrieving vectors based on index
-        all_tgt_index = []
         keys_tgt_index = []
         vals_tgt_index = []
         for i in range(self.n_head):
-                all_tgt_index.append(retrieve_parallel.remote(self.ref_keys[i],self.ref_vals[i],knns[i]))
-        all_tgt_index = ray.get(all_tgt_index)
-        keys_tgt_index = [torch.tensor(all_tgt_index[i][0]).cpu() for i in range(self.n_head)]
-        vals_tgt_index = [torch.tensor(all_tgt_index[i][1]).cpu() for i in range(self.n_head)]
+            keys_tgt_index.append(torch.tensor(keys[i][knns[i]]))
+            vals_tgt_index.append(torch.tensor(vals[i][knns[i]]))
         
-        print(f'Finding keys and vals cost {time.time()-start_time}s')
+        # print(f'Finding keys and vals cost {time.time()-start_time}s')
 
         # torch.stack(): Effectively means adding a new dimension in the dim param
         # list of (seq_len*bsz) * k * head_dim -> (seq_len*bsz) * num_heads * k * head_dim
@@ -110,3 +109,16 @@ class KNN_Dstore:
         vals_tgt_index = vals_tgt_index.view(bsz, self.n_head, seq_len, self.k, self.head_dim)
 
         return {"keys": keys_tgt_index, "vals": vals_tgt_index}
+
+    def is_master(self):
+        if not torch.distributed.is_initialized():
+            return True
+        if torch.distributed.get_rank()==0:
+            return True 
+        return False
+
+    def get_rank(self):
+        if not torch.distributed.is_initialized():
+            return -1
+        else:
+            return torch.distributed.get_rank()
