@@ -80,15 +80,15 @@ def test_shared_memory():
     shm_keys = SharedMemory(name = "keys", create=True, size = keys.nbytes)
     shm_vals = SharedMemory(name = "vals", create=True, size = vals.nbytes)
     
-    tmp_keys = np.ndarray(keys.shape, dtype = keys.dtype, buffer = shm_keys.buf)
-    tmp_vals = np.ndarray(vals.shape, dtype = vals.dtype, buffer = shm_vals.buf)
+    tmp_keys = np.ndarray(array_shape, dtype = array_type, buffer = shm_keys.buf)
+    tmp_vals = np.ndarray(array_shape, dtype = array_type, buffer = shm_vals.buf)
     tmp_keys[:] = keys[:]
     tmp_vals[:] = vals[:]
     
     print(f"Load dstore to memory cost {time.time()-start_time}")
     
     index = test_read_index()
-    retrieve(keys,vals,index)
+    retrieve(index)
 
 @ray.remote
 def retrieve_head(ref_key, ref_val, knn_index):
@@ -126,21 +126,21 @@ def retrieve_ray(keys, vals, index):
     print(f'Finding keys and vals cost {time.time()-start_time}s')
     print(f"Memory Cost: {tracemalloc.get_traced_memory()}")
     
-def retrieve(keys, vals, index):
+def retrieve(index):
     # random_sample = []
     # for i in range( n_head):
     #     random_sample.append(np.random.randint(0,dstore_size-1, size=8192*1024))
     # print(random_sample[1].shape)
     
     start_time = time.time()
-    queries = np.random.uniform(low=-10.0, high=10.0, size=(8192, 12, 64))
+    queries = np.random.uniform(low=-10.0, high=10.0, size=(4096, 12, 64))
     knns = [index[i].search(np.ascontiguousarray(queries[:, i, :]).astype(np.float32), k)[1] for i in range(n_head)]
     print(f"Index searching cost {time.time()-start_time}")
 
     shm_keys = SharedMemory(name = "keys", create=False)
     shm_vals = SharedMemory(name = "vals", create=False)
-    keys = np.ndarray(keys.shape, dtype = keys.dtype, buffer = shm_keys.buf)
-    vals = np.ndarray(vals.shape, dtype = vals.dtype, buffer = shm_vals.buf)
+    keys = np.ndarray(array_shape, dtype = array_type, buffer = shm_keys.buf)
+    vals = np.ndarray(array_shape, dtype = array_type, buffer = shm_vals.buf)
     
     start_time = time.time()
     keys_tgt_index = []
@@ -168,19 +168,22 @@ def retrieve(keys, vals, index):
     print(f"Memory Cost: {tracemalloc.get_traced_memory()}")
 
 if __name__ == '__main__':
-    n_head = 1
+    n_head = 12
     head_dim = 768 // 12
     start_time = time.time()
     dstore_size = 103226509 // 4
     k = 1024
     dstore_dir = "/home/jqcao/projects/memory_transformer/LongMem/key_value_dstore/lr_5e-5_chunk_4"
+    
+    array_shape = (n_head, dstore_size, head_dim)
+    array_type = np.float16
     # dstore_dir = "/tmp/jqcao/lr_5e-5_chunk_4"
     
     tracemalloc.start()
     
     # test_memmap()
-    # test_shared_memory()
-    test_ray()
+    test_shared_memory()
+    # test_ray()
     
     print(f"Memory Cost: {tracemalloc.get_traced_memory()}")
     tracemalloc.stop()

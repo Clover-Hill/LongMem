@@ -1061,13 +1061,6 @@ class EvalLMConfig(FairseqDataclass):
 
     # argument from KNN-LM
     
-    knn_keytype: Optional[str] = field(
-        default="",
-        metadata={
-            "help": "which part of key to store"
-        },
-    )
-    
     save_knnlm_dstore: bool = field(
         default = False,
         metadata={
@@ -1090,7 +1083,7 @@ class EvalLMConfig(FairseqDataclass):
     )
 
     dstore_fp16: bool = field(
-        default = False,
+        default = True,
         metadata={
             "help": "whether to use the fp16 in datastore"
         },

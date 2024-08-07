@@ -78,6 +78,7 @@ class NewGPTConfig(PretrainedConfig):
         dstore_dir=None,
         dstore_fp16=True,
         move_dstore_to_mem=False,
+        faiss_index_mmap=False,
         **kwargs
     ):
         self.vocab_size = vocab_size
@@ -109,6 +110,7 @@ class NewGPTConfig(PretrainedConfig):
         self.dstore_dir = dstore_dir
         self.dstore_fp16 = dstore_fp16 
         self.move_dstore_to_mem = move_dstore_to_mem
+        self.faiss_index_mmap = faiss_index_mmap
 
         super().__init__(
             bos_token_id=bos_token_id, eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs
