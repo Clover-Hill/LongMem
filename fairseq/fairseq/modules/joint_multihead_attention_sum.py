@@ -339,11 +339,12 @@ class JointMultiheadAttentionWeightedSum(nn.Module):
             if key_padding_mask is not None and key_padding_mask.dim() == 0:
                 key_padding_mask = None
 
-            if key_padding_mask is not None:
-                if key_val is not None and key_padding_mask.size(1) == tgt_len:
-                    key_padding_mask = torch.cat([torch.zeros(bsz, src_len-tgt_len).type_as(key_padding_mask), key_padding_mask], dim=1)
-                assert key_padding_mask.size(0) == bsz
-                assert key_padding_mask.size(1) == src_len
+            # What's the use of key_val
+            # if key_padding_mask is not None:
+            #     if key_val is not None and key_padding_mask.size(1) == tgt_len:
+            #         key_padding_mask = torch.cat([torch.zeros(bsz, src_len-tgt_len).type_as(key_padding_mask), key_padding_mask], dim=1)
+            #     assert key_padding_mask.size(0) == bsz
+            #     assert key_padding_mask.size(1) == src_len
 
             if self.add_zero_attn:
                 assert v is not None
@@ -382,19 +383,20 @@ class JointMultiheadAttentionWeightedSum(nn.Module):
                 #     attn_mask[:,0,1:] = attn_mask[0,0,-1]
                 attn_weights += attn_mask
 
-            if key_padding_mask is not None:
-                # don't attend to padding symbols
-                attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                if not is_tpu:
-                    attn_weights = attn_weights.masked_fill(
-                        key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
-                        float("-inf"),
-                    )
-                else:
-                    attn_weights = attn_weights.transpose(0, 2)
-                    attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
-                    attn_weights = attn_weights.transpose(0, 2)
-                attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            # Disable for is_tpu is not defined
+            # if key_padding_mask is not None:
+            #     # don't attend to padding symbols
+            #     attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            #     if not is_tpu:
+            #         attn_weights = attn_weights.masked_fill(
+            #             key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
+            #             float("-inf"),
+            #         )
+            #     else:
+            #         attn_weights = attn_weights.transpose(0, 2)
+            #         attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
+            #         attn_weights = attn_weights.transpose(0, 2)
+            #     attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
                 
             if before_softmax:
                 return attn_weights, v

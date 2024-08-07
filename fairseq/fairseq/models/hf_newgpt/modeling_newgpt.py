@@ -235,24 +235,15 @@ class NewGPTJointAttention(nn.Module):
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
 
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
+        self.knn_memory = KNN_Dstore(config)
         
         # Define dstore for this memory layer
         if self.is_master():
             print(f"Initializing KNN Dstore at rank {self.get_rank()}")
             print(f"Creating KNN Memory Dstore in dir: {config.dstore_dir}")
-            self.knn_memory = KNN_Dstore.options(name="12345", namespace="hybrid_memory", lifetime="detached").remote(config) 
-            # ray.get(self.knn_memory.setup_faiss.remote())
+            self.knn_memory.build_dstore()    
         
         if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        
-        if not self.is_master():
-            print(f"Current rank is {self.get_rank()} 11111111111111111111111111111111111111111")
-            self.knn_memory = ray.get_actor("12345", namespace="hybrid_memory")
-            print(f"{type(self.knn_memory)} 1111111111111111111111111111111")
-        
-        if torch.distributed.is_initialized():
-            print(f"Current rank is {self.get_rank()} 222222222222222222222222222222222222222")
             torch.distributed.barrier()
         
         # Support rotary embedding
@@ -330,17 +321,14 @@ class NewGPTJointAttention(nn.Module):
             key = apply_rotary_pos_emb(key, sin, cos, scale = 1 / scale)
             query = apply_rotary_pos_emb(query, sin, cos, scale = scale[(-query.shape[2]):])
 
-        print("222222222222222222222222222222222222")
-        from fairseq import pdb 
-        pdb.set_trace()
         # retrieval to get keys and vals
         # query: bsz * nhead * seq_len * head_dim
         if self.knn_memory:
             # Need to move tensor to cpu for ray datastore to handle
-            retrieval_output = self.knn_memory.retrieve.remote(qkv_dict['q'].detach().cpu())
-            retrieval_output = ray.get(retrieval_output)
+            retrieval_output = self.knn_memory.retrieve(qkv_dict['q'].detach().cpu())
             
             # The output is too large to be put in gpu
+            # Maybe not for A100
             # retrieval_k/v: bsz * num_heads * seq_len * k * head_dim
             retrieval_k = retrieval_output['keys'].cpu().type(query.dtype)
             retrieval_v = retrieval_output['vals'].cpu().type(query.dtype)
@@ -351,7 +339,7 @@ class NewGPTJointAttention(nn.Module):
             # (bsz, nhead, seq_len, 1, head_dim) @ (bsz, nhead,seq_len, head_dim, k) = (bsz, nhead, seq_len, 1, k)
             # After squeeze(-2) becomes (bsz, nhead, seq_len, k)
             # Need to also put query to cpu
-            attn_retrieval = torch.matmul(query.cpu().unsqueeze(-2), retrieval_k.transpose(-2, -1)).squeeze(-2).to(attn_weights.device) / self.scale_attn
+            attn_retrieval = torch.matmul(query.to(retrieval_k.device).unsqueeze(-2), retrieval_k.transpose(-2, -1)).squeeze(-2).to(attn_weights.device) / self.scale_attn
             
             # ALiBi Encoding
             if self.mode == "alibi":
@@ -379,7 +367,7 @@ class NewGPTJointAttention(nn.Module):
             attn_original_probs, attn_retrieval_probs = attn_hybrid_probs[..., :attn_hybrid.shape[2]], attn_hybrid_probs[..., attn_hybrid.shape[2]:]
 
             attn_original_output = torch.matmul(attn_original_probs, value_split) 
-            attn_retrieval_output = torch.matmul(attn_retrieval_probs.cpu().unsqueeze(-2), retrieval_v).squeeze(-2).to(attn_original_output.device) 
+            attn_retrieval_output = torch.matmul(attn_retrieval_probs.to(retrieval_v.device).unsqueeze(-2), retrieval_v).squeeze(-2).to(attn_original_output.device) 
             attn_output = attn_original_output + attn_retrieval_output
             
             ###############  Unlimiformer Implementation ###############
@@ -664,7 +652,7 @@ class NewGPTModel(NewGPTPreTrainedModel):
         self.scale_div = 128
         if self.mode == "rot-scale":
             self.scale_base = get_scale(self.head_dim)
-
+        
         # External Memory Layer
         self.retrieval_layer_index = config.retrieval_layer_index
         if self.is_master():

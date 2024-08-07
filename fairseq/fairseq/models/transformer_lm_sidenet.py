@@ -563,12 +563,13 @@ def transformer_lm_gpt(args):
     args.activation_fn = safe_getattr(args, "activation_fn", "gelu")
     base_lm_architecture(args)
 
+# Currently Used Config
 @register_model_architecture("transformer_lm_sidenet", "transformer_lm_sidenet_gpt2_small")
 def transformer_lm_gpt2_small(args):
-    args.decoder_embed_dim = safe_getattr(args, "decoder_embed_dim", 1024)
-    args.decoder_ffn_embed_dim = safe_getattr(args, "decoder_ffn_embed_dim", 4096)
-    args.decoder_layers = safe_getattr(args, "decoder_layers", 12)
-    args.decoder_attention_heads = safe_getattr(args, "decoder_attention_heads", 16)
+    args.decoder_embed_dim = safe_getattr(args, "decoder_embed_dim", 768)
+    args.decoder_ffn_embed_dim = safe_getattr(args, "decoder_ffn_embed_dim", 4*args.decoder_embed_dim)
+    args.decoder_layers = safe_getattr(args, "decoder_layers", 6)
+    args.decoder_attention_heads = safe_getattr(args, "decoder_attention_heads", 12)
     args.dropout = safe_getattr(args, "dropout", 0.1)
     args.attention_dropout = safe_getattr(args, "attention_dropout", 0.1)
     args.activation_fn = safe_getattr(args, "activation_fn", "gelu")

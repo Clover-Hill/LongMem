@@ -54,7 +54,7 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                             help='change the model structure')
         
         # Retrieval args
-        parser.add_argument('--gpt-model-path', default="", help='checkpoint path')
+        parser.add_argument('--gpt-model-path', default=None, help='checkpoint path')
         parser.add_argument('--use-knn-memory', action="store_true",
                             help='use knn memory or not',
                             default=False)
@@ -74,6 +74,8 @@ class NewGPTLanguageModel(FairseqLanguageModel):
                             help='if true, datastore items are saved in fp16 and int16')
         parser.add_argument('--move-dstore-to-mem', default=False, action='store_true',
                             help='move the keys and values for knn to memory')
+        parser.add_argument('--faiss-index-mmap', default=False, action='store_true',
+                            help='whether to use faiss.IO_FLAG_MMAP')
 
     @classmethod
     def build_model(cls, args, task):
@@ -84,7 +86,7 @@ class NewGPTLanguageModel(FairseqLanguageModel):
         
         # This might gets overwritten in train.py
         # The pipeline in train.py: build_model() -> build_trainer() -> load_from_checkpoint()
-        if args.gpt_model_path != "":
+        if args.gpt_model_path != None and args.gpt_model_path != "":
             print("First time finetuning:")
             print(f"Loading pretrained model from {args.gpt_model_path}")
             state = checkpoint_utils.load_checkpoint_to_cpu(args.gpt_model_path)
@@ -118,6 +120,7 @@ class NewGPTDecoder(FairseqIncrementalDecoder):
             dstore_dir=getattr(args,"dstore_dir",None),
             dstore_fp16=getattr(args,"dstore_fp16",True),
             move_store_to_mem=getattr(args,"move_dstore_to_mem",False),
+            faiss_index_mmap=getattr(args,"faiss_index_mmap",False)
         )
         self.model = NewGPTForCausalLM(config)
         
@@ -181,7 +184,7 @@ def default_architecture(args):
     args.num_layers = getattr(args, "num_layers", 12)
     args.dropout = getattr(args, "dropout", 0.1)
     args.attention_dropout = getattr(args, "attention_dropout", 0.1)
-    args.tokens_per_sample = getattr(args, "tokens_per_sample", 2048)
+    args.tokens_per_sample = getattr(args, "tokens_per_sample", 1024)
     args.newgpt_window = getattr(args, "newgpt_window", args.tokens_per_sample)
     args.retrieval_layer_index = getattr(args, "retrieval_layer_index", 9)
 
